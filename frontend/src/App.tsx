@@ -3,6 +3,10 @@ import axios from 'axios';
 import './App.css';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const storedToken = localStorage.getItem('ai_dev_token');
+if (storedToken) {
+  axios.defaults.headers.common.Authorization = `Bearer ${storedToken}`;
+}
 
 interface Project {
   _id: string;
@@ -101,6 +105,10 @@ const getLatestArtifacts = (artifacts: CodeArtifact[]) => {
 };
 
 function App() {
+  const [token, setToken] = useState(storedToken);
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [authUsername, setAuthUsername] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   
@@ -136,6 +144,22 @@ function App() {
   const notifySuccess = (msg: string) => {
     setSuccess(msg);
     setTimeout(() => setSuccess(null), 3000);
+  };
+
+  const authenticate = async () => {
+    try {
+      const response = await axios.post(`${API_URL}/auth/${authMode}`, {
+        username: authUsername,
+        password: authPassword,
+      });
+      localStorage.setItem('ai_dev_token', response.data.access_token);
+      axios.defaults.headers.common.Authorization = `Bearer ${response.data.access_token}`;
+      setToken(response.data.access_token);
+      setAuthPassword('');
+      notifySuccess(authMode === 'login' ? 'Signed in.' : 'Account created.');
+    } catch (err: any) {
+      notifyError(err.response?.data?.detail || 'Authentication failed.');
+    }
   };
 
   const fetchProjects = async () => {
@@ -335,8 +359,36 @@ function App() {
   };
 
   useEffect(() => {
-    fetchProjects();
-  }, []);
+    if (token) fetchProjects();
+  }, [token]);
+
+  if (!token) {
+    return (
+      <div className="layout">
+        <main className="main-content">
+          <div className="card form-view">
+            <h1>AI SE Assistant</h1>
+            <p>Sign in to access your projects and repository context.</p>
+            <div className="form-group">
+              <label>Username</label>
+              <input value={authUsername} onChange={event => setAuthUsername(event.target.value)} />
+            </div>
+            <div className="form-group">
+              <label>Password</label>
+              <input type="password" value={authPassword} onChange={event => setAuthPassword(event.target.value)} />
+            </div>
+            <button className="btn-primary" onClick={authenticate}>
+              {authMode === 'login' ? 'Sign In' : 'Create Account'}
+            </button>
+            <button className="btn-secondary mt-3" onClick={() => setAuthMode(authMode === 'login' ? 'register' : 'login')}>
+              {authMode === 'login' ? 'Need an account? Register' : 'Already registered? Sign in'}
+            </button>
+            {error && <div className="alert error mt-3">{error}</div>}
+          </div>
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div className="layout">
@@ -344,6 +396,11 @@ function App() {
       <aside className="sidebar">
         <div className="sidebar-header">
           <h2>AI SE Assistant</h2>
+          <button className="nav-item" onClick={() => {
+            localStorage.removeItem('ai_dev_token');
+            delete axios.defaults.headers.common.Authorization;
+            setToken(null);
+          }}>Sign out</button>
         </div>
         <nav className="sidebar-nav">
           <button 

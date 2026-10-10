@@ -83,6 +83,22 @@ Generated Java artifacts now accept safe nested relative paths such as
 `src/main/java/com/example/UserService.java`. Paths are reconstructed in isolated
 temporary build and analysis directories.
 
+### Authentication and vector-store configuration
+
+The API now requires a configured `JWT_SECRET` and protects project, requirement,
+and artifact endpoints with bearer tokens. Register or sign in through the frontend,
+or call:
+
+```http
+POST /auth/register
+POST /auth/login
+```
+
+Set `VECTOR_STORE=atlas` to use MongoDB Atlas Vector Search. The Atlas collection
+must have a vector index named by `ATLAS_VECTOR_INDEX` (default `project_chunks`)
+on the `embedding` field, with a filter on `project_id`. `VECTOR_STORE=local`
+uses the deterministic local cosine-ranking fallback.
+
 ### Known Limitations
 - Currently uses Mock MongoDB (`mongomock_motor`) for testing locally without docker, as Docker wasn't available in the test environment. Real MongoDB can be used by setting `USE_MOCK_MONGO=false` and running `docker compose up -d`.
 - Phase 4 compilation requires a JDK with `javac` on `PATH`. Docker sandbox compilation is not configured in this repository.

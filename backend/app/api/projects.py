@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from typing import List
 from uuid import uuid4
 from ..models.project import Project, ProjectCreate
@@ -6,36 +6,38 @@ from ..models.requirement import Requirement, RequirementCreate
 from ..models.rag import ProjectFileBatch
 from ..db.mongodb import get_db
 from ..services.rag.service import index_project_files
+from app.auth import get_current_user
 
 router = APIRouter()
 
 @router.post("/", response_model=Project)
-async def create_project(project_in: ProjectCreate):
+async def create_project(project_in: ProjectCreate, user: dict = Depends(get_current_user)):
     db = get_db()
     new_project = project_in.dict()
     new_project["_id"] = str(uuid4())
     new_project["status"] = "REQUIREMENT_PENDING"
+    new_project["owner_id"] = user["user_id"]
     await db.projects.insert_one(new_project)
     return new_project
 
 @router.get("/", response_model=List[Project])
-async def get_projects():
+async def get_projects(user: dict = Depends(get_current_user)):
     db = get_db()
-    projects = await db.projects.find().to_list(1000)
+    projects = await db.projects.find({"owner_id": user["user_id"]}).to_list(1000)
     return projects
 
 @router.get("/{project_id}", response_model=Project)
-async def get_project(project_id: str):
+async def get_project(project_id: str, user: dict = Depends(get_current_user)):
     db = get_db()
-    project = await db.projects.find_one({"_id": project_id})
+    project = await db.projects.find_one({"_id": project_id, "owner_id": user["user_id"]})
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     return project
 
 @router.post("/{project_id}/requirements", response_model=Requirement)
-async def add_requirement(project_id: str, req_in: RequirementCreate):
+async def add_requirement(project_id: str, req_in: RequirementCreate, user: dict = Depends(get_current_user)):
     db = get_db()
-    project = await db.projects.find_one({"_id": project_id})
+    project = await db.projects.find_one({"_id": project_id, "owner_id": user["user_id"]})
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
         
@@ -48,16 +50,18 @@ async def add_requirement(project_id: str, req_in: RequirementCreate):
     return new_req
 
 @router.get("/{project_id}/requirements", response_model=List[Requirement])
-async def get_requirements(project_id: str):
+async def get_requirements(project_id: str, user: dict = Depends(get_current_user)):
     db = get_db()
+    if not await db.projects.find_one({"_id": project_id, "owner_id": user["user_id"]}):
+        raise HTTPException(status_code=404, detail="Project not found")
     reqs = await db.requirements.find({"projectId": project_id}).to_list(1000)
     return reqs
 
 
 @router.post("/{project_id}/files")
-async def index_files(project_id: str, files_in: ProjectFileBatch):
+async def index_files(project_id: str, files_in: ProjectFileBatch, user: dict = Depends(get_current_user)):
     db = get_db()
-    if not await db.projects.find_one({"_id": project_id}):
+    if not await db.projects.find_one({"_id": project_id, "owner_id": user["user_id"]}):
         raise HTTPException(status_code=404, detail="Project not found")
     count = await index_project_files(project_id, files_in.files)
     return {"project_id": project_id, "indexed_chunks": count}

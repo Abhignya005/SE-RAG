@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
 from app.db.mongodb import get_db
@@ -24,6 +24,7 @@ from app.models.code_artifact import (
     CompileResult,
     StaticAnalysisResult,
 )
+from app.auth import get_current_user
 
 router = APIRouter()
 JAVA_FILE_NAME_PATTERN = re.compile(
@@ -66,9 +67,11 @@ def _source_path(temp_dir: str, file_name: str, content: str) -> Path:
 
 
 @router.put("/{artifact_id}", response_model=CodeArtifact)
-async def edit_artifact(artifact_id: str, artifact_in: CodeArtifactEdit):
+async def edit_artifact(artifact_id: str, artifact_in: CodeArtifactEdit, user: dict = Depends(get_current_user)):
     db = get_db()
     current = await db.code_artifacts.find_one({"artifact_id": artifact_id})
+    if current and not await db.projects.find_one({"_id": current["project_id"], "owner_id": user["user_id"]}):
+        current = None
     if not current:
         raise HTTPException(status_code=404, detail="Code artifact not found")
 
@@ -102,9 +105,11 @@ async def edit_artifact(artifact_id: str, artifact_in: CodeArtifactEdit):
 
 
 @router.post("/{artifact_id}/compile", response_model=CompileResult)
-async def compile_artifact(artifact_id: str):
+async def compile_artifact(artifact_id: str, user: dict = Depends(get_current_user)):
     db = get_db()
     artifact = await db.code_artifacts.find_one({"artifact_id": artifact_id})
+    if artifact and not await db.projects.find_one({"_id": artifact["project_id"], "owner_id": user["user_id"]}):
+        artifact = None
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
     if artifact.get("language") != "Java":
@@ -157,7 +162,7 @@ async def compile_artifact(artifact_id: str):
                 check=False,
             )
         status = "PASSED" if completed.returncode == 0 else "FAILED"
-        return CompileResult(
+        result = CompileResult(
             artifact_id=artifact_id,
             status=status,
             exit_code=completed.returncode,
@@ -166,8 +171,10 @@ async def compile_artifact(artifact_id: str):
             duration_ms=round((time.perf_counter() - started) * 1000),
             timestamp=datetime.utcnow(),
         )
+        await db.compile_results.insert_one(result.model_dump())
+        return result
     except subprocess.TimeoutExpired as exc:
-        return CompileResult(
+        result = CompileResult(
             artifact_id=artifact_id,
             status="TOOL_ERROR",
             stderr=f"Java compilation exceeded the {COMPILE_TIMEOUT_SECONDS}-second timeout.",
@@ -175,6 +182,8 @@ async def compile_artifact(artifact_id: str):
             duration_ms=round((time.perf_counter() - started) * 1000),
             timestamp=datetime.utcnow(),
         )
+        await db.compile_results.insert_one(result.model_dump())
+        return result
 
 
 def _latest_artifacts(artifacts: list[dict]) -> list[dict]:
@@ -328,9 +337,11 @@ def _run_semgrep(source_dir: str, source_paths: list[str]) -> AnalysisToolResult
 
 
 @router.post("/{artifact_id}/analyze", response_model=StaticAnalysisResult)
-async def analyze_artifact(artifact_id: str):
+async def analyze_artifact(artifact_id: str, user: dict = Depends(get_current_user)):
     db = get_db()
     artifact = await db.code_artifacts.find_one({"artifact_id": artifact_id})
+    if artifact and not await db.projects.find_one({"_id": artifact["project_id"], "owner_id": user["user_id"]}):
+        artifact = None
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
     if artifact.get("language") != "Java":
@@ -378,19 +389,42 @@ async def analyze_artifact(artifact_id: str):
     )
     await db.static_analysis_results.insert_one(result.model_dump())
     if result.status == "COMPLETED":
-        requirements = await db.requirements.find(
-            {"projectId": artifact["project_id"]}
-        ).to_list(1000)
-        project = await db.projects.find_one({"_id": artifact["project_id"]})
-        if project and requirements and all(item.get("status") == "CONFIRMED" for item in requirements):
-            await db.projects.update_one({"_id": artifact["project_id"]}, {"$set": {"status": "COMPLETED"}})
+        requirements = await db.requirements.find({"projectId": artifact["project_id"]}).to_list(1000)
+        if requirements:
+            complete = True
+            for requirement in requirements:
+                artifacts = await db.code_artifacts.find(
+                    {"requirement_id": requirement["_id"], "project_id": artifact["project_id"]}
+                ).to_list(1000)
+                latest = _latest_artifacts(artifacts)
+                if requirement.get("status") != "CONFIRMED" or not latest:
+                    complete = False
+                    break
+                for latest_artifact in latest:
+                    compile_result = await db.compile_results.find_one(
+                        {"artifact_id": latest_artifact["artifact_id"], "status": "PASSED"},
+                        sort=[("timestamp", -1)],
+                    )
+                    analysis_result = await db.static_analysis_results.find_one(
+                        {"artifact_id": latest_artifact["artifact_id"], "status": "COMPLETED"},
+                        sort=[("created_at", -1)],
+                    )
+                    if not compile_result or not analysis_result:
+                        complete = False
+                        break
+            if complete:
+                await db.projects.update_one(
+                    {"_id": artifact["project_id"]}, {"$set": {"status": "COMPLETED"}}
+                )
     return result
 
 
 @router.get("/{artifact_id}/analysis", response_model=Optional[StaticAnalysisResult])
-async def get_latest_analysis(artifact_id: str):
+async def get_latest_analysis(artifact_id: str, user: dict = Depends(get_current_user)):
     db = get_db()
     artifact = await db.code_artifacts.find_one({"artifact_id": artifact_id})
+    if artifact and not await db.projects.find_one({"_id": artifact["project_id"], "owner_id": user["user_id"]}):
+        artifact = None
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
     return await db.static_analysis_results.find_one(

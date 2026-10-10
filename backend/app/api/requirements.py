@@ -2,22 +2,25 @@ import re
 from datetime import datetime
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import ValidationError
 from app.db.mongodb import get_db
 from app.models.code_artifact import CodeArtifact
 from app.models.requirement import Requirement, RequirementAnalysis
 from app.services.ai.service import analyze_requirement_text, generate_java_code
 from app.services.rag.service import retrieve_context
+from app.auth import get_current_user
 
 router = APIRouter()
 
-JAVA_FILE_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\.java$")
+JAVA_FILE_NAME_PATTERN = re.compile(r"^(?:[A-Za-z0-9_.-]+/)*[A-Za-z_][A-Za-z0-9_]*\.java$")
 
 @router.post("/{requirement_id}/analyze", response_model=Requirement)
-async def analyze_requirement(requirement_id: str):
+async def analyze_requirement(requirement_id: str, user: dict = Depends(get_current_user)):
     db = get_db()
     req_data = await db.requirements.find_one({"_id": requirement_id})
+    if req_data and not await db.projects.find_one({"_id": req_data["projectId"], "owner_id": user["user_id"]}):
+        req_data = None
     if not req_data:
         raise HTTPException(status_code=404, detail="Requirement not found")
     
@@ -53,9 +56,11 @@ async def analyze_requirement(requirement_id: str):
 
 
 @router.post("/{requirement_id}/confirm", response_model=Requirement)
-async def confirm_requirement(requirement_id: str):
+async def confirm_requirement(requirement_id: str, user: dict = Depends(get_current_user)):
     db = get_db()
     req_data = await db.requirements.find_one({"_id": requirement_id})
+    if req_data and not await db.projects.find_one({"_id": req_data["projectId"], "owner_id": user["user_id"]}):
+        req_data = None
     if not req_data:
         raise HTTPException(status_code=404, detail="Requirement not found")
 
@@ -79,9 +84,11 @@ async def confirm_requirement(requirement_id: str):
 
 
 @router.post("/{requirement_id}/generate-code", response_model=list[CodeArtifact])
-async def generate_code(requirement_id: str):
+async def generate_code(requirement_id: str, user: dict = Depends(get_current_user)):
     db = get_db()
     req_data = await db.requirements.find_one({"_id": requirement_id})
+    if req_data and not await db.projects.find_one({"_id": req_data["projectId"], "owner_id": user["user_id"]}):
+        req_data = None
     if not req_data:
         raise HTTPException(status_code=404, detail="Requirement not found")
 
@@ -164,9 +171,11 @@ async def generate_code(requirement_id: str):
 
 
 @router.get("/{requirement_id}/artifacts", response_model=list[CodeArtifact])
-async def get_requirement_artifacts(requirement_id: str):
+async def get_requirement_artifacts(requirement_id: str, user: dict = Depends(get_current_user)):
     db = get_db()
     requirement = await db.requirements.find_one({"_id": requirement_id})
+    if requirement and not await db.projects.find_one({"_id": requirement["projectId"], "owner_id": user["user_id"]}):
+        requirement = None
     if not requirement:
         raise HTTPException(status_code=404, detail="Requirement not found")
     return await db.code_artifacts.find(

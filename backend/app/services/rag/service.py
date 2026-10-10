@@ -1,4 +1,5 @@
 import math
+import os
 from uuid import uuid4
 
 from app.db.mongodb import get_db
@@ -35,12 +36,26 @@ async def index_project_files(project_id: str, files: list[ProjectFile]) -> int:
 async def retrieve_context(project_id: str, query: str, limit: int = 5) -> tuple[str, list[Citation]]:
     db = get_db()
     query_embedding = embed_text(query)
-    chunks = await db.project_chunks.find({"project_id": project_id}).to_list(1000)
-    ranked = sorted(
-        (( _cosine(query_embedding, chunk.get("embedding", [])), chunk) for chunk in chunks),
-        key=lambda item: item[0],
-        reverse=True,
-    )[:limit]
+    if os.getenv("VECTOR_STORE", "local").lower() == "atlas":
+        pipeline = [{
+            "$vectorSearch": {
+                "index": os.getenv("ATLAS_VECTOR_INDEX", "project_chunks"),
+                "path": "embedding",
+                "queryVector": query_embedding,
+                "numCandidates": max(limit * 20, 100),
+                "limit": limit,
+                "filter": {"project_id": project_id},
+            }
+        }, {"$addFields": {"relevance_score": {"$meta": "vectorSearchScore"}}}]
+        chunks = await db.project_chunks.aggregate(pipeline).to_list(limit)
+        ranked = [(float(chunk.pop("relevance_score", 0)), chunk) for chunk in chunks]
+    else:
+        chunks = await db.project_chunks.find({"project_id": project_id}).to_list(1000)
+        ranked = sorted(
+            ((_cosine(query_embedding, chunk.get("embedding", [])), chunk) for chunk in chunks),
+            key=lambda item: item[0],
+            reverse=True,
+        )[:limit]
     selected = ranked
     citations = [
         Citation(
