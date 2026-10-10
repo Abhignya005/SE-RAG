@@ -1,0 +1,670 @@
+import { useState, useEffect } from 'react';
+import axios from 'axios';
+import './App.css';
+
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
+interface Project {
+  _id: string;
+  name: string;
+  description: string;
+  language: string;
+  status: string;
+}
+
+interface RequirementAnalysis {
+  functional_requirements: string[];
+  non_functional_requirements: string[];
+  assumptions: string[];
+  ambiguities: string[];
+  edge_cases: string[];
+  acceptance_criteria: string[];
+}
+
+interface Requirement {
+  _id: string;
+  projectId: string;
+  title: string;
+  description: string;
+  status: string;
+  analysis?: RequirementAnalysis;
+}
+
+interface CodeArtifact {
+  artifact_id: string;
+  project_id: string;
+  requirement_id: string;
+  file_name: string;
+  language: 'Java';
+  content: string;
+  version: number;
+  source: 'AI_GENERATED' | 'DEVELOPER_EDITED';
+  status: 'AI_GENERATED' | 'EDITED';
+  created_at: string;
+  updated_at: string;
+}
+
+interface CompileResult {
+  artifact_id: string;
+  status: 'PASSED' | 'FAILED' | 'TOOL_ERROR';
+  exit_code: number | null;
+  stdout: string;
+  stderr: string;
+  duration_ms: number;
+  timestamp: string;
+}
+
+interface AnalysisFinding {
+  tool: 'Checkstyle' | 'SpotBugs' | 'Semgrep';
+  severity: string;
+  file: string;
+  line: number | null;
+  column: number | null;
+  rule: string | null;
+  message: string;
+}
+
+interface AnalysisToolResult {
+  status: 'COMPLETED' | 'UNAVAILABLE' | 'NOT_RUN' | 'FAILED';
+  findings: AnalysisFinding[];
+}
+
+interface StaticAnalysisResult {
+  analysis_id: string;
+  artifact_id: string;
+  status: 'COMPLETED' | 'PARTIAL' | 'TOOL_ERROR';
+  checkstyle: AnalysisToolResult;
+  spotbugs: AnalysisToolResult;
+  security: AnalysisToolResult;
+  created_at: string;
+}
+
+const getLatestArtifacts = (artifacts: CodeArtifact[]) => {
+  const latest = new Map<string, CodeArtifact>();
+  artifacts.forEach(artifact => {
+    const current = latest.get(artifact.file_name);
+    if (!current || artifact.version > current.version) {
+      latest.set(artifact.file_name, artifact);
+    }
+  });
+  return Array.from(latest.values());
+};
+
+function App() {
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [selectedProject, setSelectedProject] = useState<Project | null>(null);
+  
+  // UI State
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+  
+  // Forms
+  const [showCreateProject, setShowCreateProject] = useState(false);
+  const [newProjectName, setNewProjectName] = useState('');
+  const [newProjectDesc, setNewProjectDesc] = useState('');
+  
+  const [requirements, setRequirements] = useState<Requirement[]>([]);
+  const [reqTitle, setReqTitle] = useState('');
+  const [reqDesc, setReqDesc] = useState('');
+  const [artifactsByRequirement, setArtifactsByRequirement] = useState<Record<string, CodeArtifact[]>>({});
+  const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
+  const [draftArtifactContent, setDraftArtifactContent] = useState('');
+  const [savingArtifact, setSavingArtifact] = useState(false);
+  const [compilingArtifactId, setCompilingArtifactId] = useState<string | null>(null);
+  const [compileResults, setCompileResults] = useState<Record<string, CompileResult>>({});
+  const [analyzingArtifactId, setAnalyzingArtifactId] = useState<string | null>(null);
+  const [analysisResults, setAnalysisResults] = useState<Record<string, StaticAnalysisResult>>({});
+
+  // Notifications
+  const notifyError = (msg: string) => {
+    setError(msg);
+    setTimeout(() => setError(null), 5000);
+  };
+  const notifySuccess = (msg: string) => {
+    setSuccess(msg);
+    setTimeout(() => setSuccess(null), 3000);
+  };
+
+  const fetchProjects = async () => {
+    setLoading(true);
+    try {
+      const res = await axios.get(`${API_URL}/projects`);
+      setProjects(res.data);
+    } catch (err) {
+      notifyError("Failed to load projects. Is the backend running?");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const createProject = async () => {
+    if (!newProjectName) {
+      notifyError("Project name is required.");
+      return;
+    }
+    setLoading(true);
+    try {
+      await axios.post(`${API_URL}/projects`, {
+        name: newProjectName,
+        description: newProjectDesc,
+        language: 'Java',
+      });
+      setNewProjectName('');
+      setNewProjectDesc('');
+      setShowCreateProject(false);
+      notifySuccess("Project created successfully.");
+      await fetchProjects();
+    } catch (err) {
+      notifyError("Failed to create project.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchRequirements = async (projectId: string) => {
+    setLoading(true);
+    try {
+      const res = await axios.get(`${API_URL}/projects/${projectId}/requirements`);
+      setRequirements(res.data);
+      await Promise.all(res.data
+        .filter((requirement: Requirement) => requirement.status === 'CONFIRMED')
+        .map(async (requirement: Requirement) => {
+          const artifactRes = await axios.get(`${API_URL}/requirements/${requirement._id}/artifacts`);
+          setArtifactsByRequirement(current => ({ ...current, [requirement._id]: artifactRes.data }));
+        }));
+    } catch (err) {
+      notifyError("Failed to load requirements.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const generateCode = async (requirement: Requirement) => {
+    setLoading(true);
+    try {
+      const res = await axios.post(`${API_URL}/requirements/${requirement._id}/generate-code`);
+      setArtifactsByRequirement(current => ({
+        ...current,
+        [requirement._id]: [...(current[requirement._id] || []), ...res.data],
+      }));
+      notifySuccess("Java source generated successfully.");
+    } catch (err: any) {
+      if (!err.response) {
+        notifyError("Backend unavailable. Start the API and try again.");
+      } else {
+        notifyError(
+          err.response.data?.detail ||
+          `Code generation failed (HTTP ${err.response.status}).`,
+        );
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const selectArtifact = (artifact: CodeArtifact) => {
+    setSelectedArtifactId(artifact.artifact_id);
+    setDraftArtifactContent(artifact.content);
+  };
+
+  const saveArtifact = async (artifact: CodeArtifact) => {
+    if (!draftArtifactContent.trim()) {
+      notifyError("Code content cannot be empty.");
+      return;
+    }
+    setSavingArtifact(true);
+    try {
+      const res = await axios.put(`${API_URL}/artifacts/${artifact.artifact_id}`, {
+        content: draftArtifactContent,
+      });
+      setArtifactsByRequirement(current => ({
+        ...current,
+        [artifact.requirement_id]: [...(current[artifact.requirement_id] || []), res.data],
+      }));
+      setSelectedArtifactId(res.data.artifact_id);
+      setDraftArtifactContent(res.data.content);
+      notifySuccess(`Saved ${res.data.file_name} version ${res.data.version}.`);
+    } catch (err: any) {
+      notifyError(err.response?.data?.detail || "Failed to save code artifact.");
+    } finally {
+      setSavingArtifact(false);
+    }
+  };
+
+  const compileArtifact = async (artifact: CodeArtifact) => {
+    setCompilingArtifactId(artifact.artifact_id);
+    try {
+      const res = await axios.post(`${API_URL}/artifacts/${artifact.artifact_id}/compile`);
+      setCompileResults(current => ({ ...current, [artifact.artifact_id]: res.data }));
+      if (res.data.status === 'PASSED') {
+        notifySuccess(`BUILD PASSED in ${res.data.duration_ms} ms.`);
+      } else {
+        notifyError(`BUILD ${res.data.status}: ${res.data.stderr || 'See compiler output below.'}`);
+      }
+    } catch (err: any) {
+      if (err.response?.data?.status) {
+        const result = err.response.data as CompileResult;
+        setCompileResults(current => ({ ...current, [artifact.artifact_id]: result }));
+        notifyError(result.stderr || `Compilation tool error (HTTP ${err.response.status}).`);
+      } else if (!err.response) {
+        notifyError("Backend unavailable. Start the API and try again.");
+      } else {
+        notifyError(err.response.data?.detail || `Compilation failed (HTTP ${err.response.status}).`);
+      }
+    } finally {
+      setCompilingArtifactId(null);
+    }
+  };
+
+  const analyzeArtifact = async (artifact: CodeArtifact) => {
+    setAnalyzingArtifactId(artifact.artifact_id);
+    try {
+      const res = await axios.post(`${API_URL}/artifacts/${artifact.artifact_id}/analyze`);
+      setAnalysisResults(current => ({ ...current, [artifact.artifact_id]: res.data }));
+      notifySuccess("Static and security analysis completed.");
+    } catch (err: any) {
+      if (!err.response) {
+        notifyError("Backend unavailable. Start the API and try again.");
+      } else {
+        notifyError(err.response.data?.detail || `Analysis failed (HTTP ${err.response.status}).`);
+      }
+    } finally {
+      setAnalyzingArtifactId(null);
+    }
+  };
+
+  const saveRequirement = async () => {
+    if (!selectedProject || !reqTitle || !reqDesc) {
+      notifyError("Title and Description are required.");
+      return;
+    }
+    setLoading(true);
+    try {
+      await axios.post(`${API_URL}/projects/${selectedProject._id}/requirements`, {
+        title: reqTitle,
+        description: reqDesc,
+      });
+      setReqTitle('');
+      setReqDesc('');
+      notifySuccess("Requirement saved successfully.");
+      await fetchRequirements(selectedProject._id);
+    } catch (err) {
+      notifyError("Failed to save requirement.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const openProject = (project: Project) => {
+    setSelectedProject(project);
+    fetchRequirements(project._id);
+    setShowCreateProject(false);
+  };
+
+  useEffect(() => {
+    fetchProjects();
+  }, []);
+
+  return (
+    <div className="layout">
+      {/* Sidebar */}
+      <aside className="sidebar">
+        <div className="sidebar-header">
+          <h2>AI SE Assistant</h2>
+        </div>
+        <nav className="sidebar-nav">
+          <button 
+            className={`nav-item ${!selectedProject && !showCreateProject ? 'active' : ''}`} 
+            onClick={() => { setSelectedProject(null); setShowCreateProject(false); }}
+          >
+            Dashboard
+          </button>
+          <button 
+            className={`nav-item ${showCreateProject ? 'active' : ''}`}
+            onClick={() => { setShowCreateProject(true); setSelectedProject(null); }}
+          >
+            + New Project
+          </button>
+          
+          <div className="nav-section">
+            <h4>Recent Projects</h4>
+            {projects.map(p => (
+              <button 
+                key={p._id} 
+                className={`nav-item sub-item ${selectedProject?._id === p._id ? 'active' : ''}`}
+                onClick={() => openProject(p)}
+              >
+                {p.name}
+              </button>
+            ))}
+          </div>
+        </nav>
+      </aside>
+
+      {/* Main Content */}
+      <main className="main-content">
+        <header className="header">
+          <h1>{selectedProject ? selectedProject.name : showCreateProject ? 'Create Project' : 'Projects Dashboard'}</h1>
+          {loading && <span className="loader">Loading...</span>}
+        </header>
+
+        {/* Notifications */}
+        <div className="notifications">
+          {error && <div className="alert error">{error}</div>}
+          {success && <div className="alert success">{success}</div>}
+        </div>
+
+        <div className="content-body">
+          {/* Dashboard View */}
+          {!selectedProject && !showCreateProject && (
+            <div className="dashboard-view">
+              {projects.length === 0 ? (
+                <div className="empty-state">
+                  <h3>No projects found</h3>
+                  <p>Get started by creating your first project.</p>
+                  <button className="btn-primary mt-3" onClick={() => setShowCreateProject(true)}>Create Project</button>
+                </div>
+              ) : (
+                <div className="card-grid">
+                  {projects.map(p => (
+                    <div className="card project-card" key={p._id} onClick={() => openProject(p)}>
+                      <h3>{p.name}</h3>
+                      <p className="desc">{p.description || 'No description provided.'}</p>
+                      <div className="tags">
+                        <span className="tag status">{p.status}</span>
+                        <span className="tag lang">{p.language}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Create Project View */}
+          {showCreateProject && (
+            <div className="form-view card">
+              <h2>Project Details</h2>
+              <div className="form-group">
+                <label>Project Name</label>
+                <input 
+                  type="text" 
+                  value={newProjectName} 
+                  onChange={e => setNewProjectName(e.target.value)} 
+                  placeholder="e.g., Student Management System"
+                />
+              </div>
+              <div className="form-group">
+                <label>Description (Optional)</label>
+                <textarea 
+                  value={newProjectDesc} 
+                  onChange={e => setNewProjectDesc(e.target.value)}
+                  placeholder="Describe the purpose of this project..."
+                />
+              </div>
+              <div className="form-actions">
+                <button className="btn-secondary" onClick={() => setShowCreateProject(false)}>Cancel</button>
+                <button className="btn-primary" onClick={createProject} disabled={loading}>Save Project</button>
+              </div>
+            </div>
+          )}
+
+          {/* Project Details View */}
+          {selectedProject && (
+            <div className="project-view">
+              <div className="card project-info">
+                <div className="info-header">
+                  <h2>Information</h2>
+                  <span className="tag status-pill">{selectedProject.status}</span>
+                </div>
+                <p><strong>Language:</strong> {selectedProject.language}</p>
+                <p><strong>Description:</strong> {selectedProject.description}</p>
+              </div>
+
+              <div className="card requirements-section mt-4">
+                <h2>Requirements</h2>
+                
+                {requirements.length === 0 ? (
+                  <div className="empty-state small">
+                    <p>No requirements submitted yet.</p>
+                  </div>
+                ) : (
+                  <ul className="req-list">
+                    {requirements.map(r => (
+                      <li key={r._id} className="req-item">
+                        <div className="req-header">
+                          <h4>{r.title}</h4>
+                          <span className="tag status">{r.status}</span>
+                        </div>
+                        <p>{r.description}</p>
+                        
+                        {(r.status === 'DRAFT' || r.status === 'ANALYSIS_FAILED') && (
+                          <button className="btn-primary mt-3" onClick={async () => {
+                            setLoading(true);
+                            try {
+                              await axios.post(`${API_URL}/requirements/${r._id}/analyze`);
+                              notifySuccess("Analysis complete!");
+                              await fetchRequirements(selectedProject._id);
+                            } catch (err: any) {
+                              notifyError(err.response?.data?.detail || "Analysis failed");
+                              await fetchRequirements(selectedProject._id); // Update status to FAILED
+                            } finally {
+                              setLoading(false);
+                            }
+                          }} disabled={loading}>Analyze Requirement</button>
+                        )}
+
+                        {r.status === 'ANALYZING' && (
+                          <div className="mt-3 loader">Analyzing requirement with AI...</div>
+                        )}
+
+                        {r.analysis && (
+                          <div className="analysis-results mt-3">
+                            <h4>AI Requirement Analysis</h4>
+                            <div className="analysis-section">
+                              <h5>Functional Requirements</h5>
+                              <ul>{r.analysis.functional_requirements.map((i, idx) => <li key={idx}>{i}</li>)}</ul>
+                            </div>
+                            <div className="analysis-section">
+                              <h5>Non-Functional Requirements</h5>
+                              <ul>{r.analysis.non_functional_requirements.map((i, idx) => <li key={idx}>{i}</li>)}</ul>
+                            </div>
+                            <div className="analysis-section">
+                              <h5>Assumptions</h5>
+                              <ul>{r.analysis.assumptions.map((i, idx) => <li key={idx}>{i}</li>)}</ul>
+                            </div>
+                            <div className="analysis-section">
+                              <h5>Ambiguities</h5>
+                              <ul>{r.analysis.ambiguities.map((i, idx) => <li key={idx}>{i}</li>)}</ul>
+                            </div>
+                            <div className="analysis-section">
+                              <h5>Edge Cases</h5>
+                              <ul>{r.analysis.edge_cases.map((i, idx) => <li key={idx}>{i}</li>)}</ul>
+                            </div>
+                            <div className="analysis-section">
+                              <h5>Acceptance Criteria</h5>
+                              <ul>{r.analysis.acceptance_criteria.map((i, idx) => <li key={idx}>{i}</li>)}</ul>
+                            </div>
+
+                            {r.status === 'ANALYZED' && (
+                              <button className="btn-success mt-3" onClick={async () => {
+                                setLoading(true);
+                                try {
+                                  await axios.post(`${API_URL}/requirements/${r._id}/confirm`);
+                                  notifySuccess("Requirement confirmed!");
+                                  await fetchRequirements(selectedProject._id);
+                                } catch (err) {
+                                  notifyError("Failed to confirm requirement.");
+                                } finally {
+                                  setLoading(false);
+                                }
+                              }} disabled={loading}>Confirm Requirement</button>
+                            )}
+                          </div>
+                        )}
+
+                        {r.status === 'CONFIRMED' && (() => {
+                          const requirementArtifacts = artifactsByRequirement[r._id] || [];
+                          const latestArtifacts = getLatestArtifacts(requirementArtifacts);
+                          const selectedArtifact = requirementArtifacts.find(
+                            artifact => artifact.artifact_id === selectedArtifactId,
+                          ) || latestArtifacts[0];
+
+                          return (
+                            <div className="code-artifacts mt-3">
+                              <div className="code-artifacts-header">
+                                <h4>Generated Code</h4>
+                                <button
+                                  className="btn-primary"
+                                  onClick={() => generateCode(r)}
+                                  disabled={loading}
+                                >
+                                  Generate Code
+                                </button>
+                              </div>
+
+                              {latestArtifacts.length === 0 ? (
+                                <p className="code-empty">No generated files yet.</p>
+                              ) : (
+                                <div className="code-workspace">
+                                  <div className="code-file-list">
+                                    <h5>Files</h5>
+                                    {latestArtifacts.map(artifact => (
+                                      <button
+                                        key={artifact.file_name}
+                                        className={`code-file-button ${selectedArtifact?.file_name === artifact.file_name ? 'active' : ''}`}
+                                        onClick={() => selectArtifact(artifact)}
+                                      >
+                                        {artifact.file_name}
+                                        <span>v{artifact.version}</span>
+                                      </button>
+                                    ))}
+                                    <h5 className="version-heading">Versions</h5>
+                                    {requirementArtifacts.map(artifact => (
+                                      <button
+                                        key={artifact.artifact_id}
+                                        className="version-button"
+                                        onClick={() => selectArtifact(artifact)}
+                                      >
+                                        {artifact.file_name} v{artifact.version}
+                                      </button>
+                                    ))}
+                                  </div>
+                                  {selectedArtifact && (
+                                    <div className="code-editor">
+                                      <div className="code-editor-header">
+                                        <strong>{selectedArtifact.file_name}</strong>
+                                        <span>Version {selectedArtifact.version} · {selectedArtifact.source}</span>
+                                      </div>
+                                      <textarea
+                                        value={selectedArtifactId === selectedArtifact.artifact_id ? draftArtifactContent : selectedArtifact.content}
+                                        onChange={event => {
+                                          setSelectedArtifactId(selectedArtifact.artifact_id);
+                                          setDraftArtifactContent(event.target.value);
+                                        }}
+                                        spellCheck={false}
+                                      />
+                                      <button
+                                        className="btn-success mt-3"
+                                        onClick={() => saveArtifact(selectedArtifact)}
+                                        disabled={savingArtifact}
+                                      >
+                                        Save New Version
+                                      </button>
+                                      <button
+                                        className="btn-primary mt-3 compile-button"
+                                        onClick={() => compileArtifact(selectedArtifact)}
+                                        disabled={compilingArtifactId === selectedArtifact.artifact_id}
+                                      >
+                                        {compilingArtifactId === selectedArtifact.artifact_id ? 'Compiling...' : 'Compile'}
+                                      </button>
+                                      {compileResults[selectedArtifact.artifact_id] && (
+                                        <div className={`compile-result ${compileResults[selectedArtifact.artifact_id].status.toLowerCase()}`}>
+                                          <strong>BUILD {compileResults[selectedArtifact.artifact_id].status}</strong>
+                                          <span>Exit Code: {compileResults[selectedArtifact.artifact_id].exit_code ?? 'N/A'}</span>
+                                          <span>Compilation Time: {compileResults[selectedArtifact.artifact_id].duration_ms} ms</span>
+                                          {compileResults[selectedArtifact.artifact_id].stdout && (
+                                            <pre>{compileResults[selectedArtifact.artifact_id].stdout}</pre>
+                                          )}
+                                          {compileResults[selectedArtifact.artifact_id].stderr && (
+                                            <pre>{compileResults[selectedArtifact.artifact_id].stderr}</pre>
+                                          )}
+                                        </div>
+                                      )}
+                                      <button
+                                        className="btn-primary mt-3"
+                                        onClick={() => analyzeArtifact(selectedArtifact)}
+                                        disabled={analyzingArtifactId === selectedArtifact.artifact_id}
+                                      >
+                                        {analyzingArtifactId === selectedArtifact.artifact_id ? 'Analyzing...' : 'Run Static Analysis'}
+                                      </button>
+                                      {analysisResults[selectedArtifact.artifact_id] && (
+                                        <div className="analysis-tools-result">
+                                          <h5>Static Analysis</h5>
+                                          <span>Overall status: {analysisResults[selectedArtifact.artifact_id].status}</span>
+                                          {([
+                                            ['Checkstyle', analysisResults[selectedArtifact.artifact_id].checkstyle],
+                                            ['SpotBugs', analysisResults[selectedArtifact.artifact_id].spotbugs],
+                                            ['Security', analysisResults[selectedArtifact.artifact_id].security],
+                                          ] as [string, AnalysisToolResult][]).map(([label, toolResult]) => (
+                                            <div className="analysis-tool-group" key={label}>
+                                              <div className="analysis-tool-heading">
+                                                <strong>{label}</strong>
+                                                <span>{toolResult.status} · {toolResult.findings.length} findings</span>
+                                              </div>
+                                              {toolResult.findings.map((finding, index) => (
+                                                <div className="analysis-finding" key={`${finding.tool}-${finding.file}-${finding.line}-${index}`}>
+                                                  <strong>{finding.severity}</strong>
+                                                  <span>{finding.file}:{finding.line ?? 'n/a'}{finding.column ? `:${finding.column}` : ''}</span>
+                                                  <span>{finding.rule || finding.tool}</span>
+                                                  <p>{finding.message}</p>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+
+                <div className="add-req-form mt-4">
+                  <h3>Add New Requirement</h3>
+                  <div className="form-group">
+                    <input 
+                      type="text" 
+                      placeholder="Requirement Title" 
+                      value={reqTitle} 
+                      onChange={e => setReqTitle(e.target.value)} 
+                    />
+                  </div>
+                  <div className="form-group">
+                    <textarea 
+                      placeholder="Requirement Details (e.g., The system should allow users to log in...)" 
+                      value={reqDesc} 
+                      onChange={e => setReqDesc(e.target.value)}
+                    />
+                  </div>
+                  <button className="btn-primary" onClick={saveRequirement} disabled={loading}>
+                    Submit Requirement
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </main>
+    </div>
+  );
+}
+
+export default App;
