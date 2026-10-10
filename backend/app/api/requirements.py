@@ -8,6 +8,7 @@ from app.db.mongodb import get_db
 from app.models.code_artifact import CodeArtifact
 from app.models.requirement import Requirement, RequirementAnalysis
 from app.services.ai.service import analyze_requirement_text, generate_java_code
+from app.services.rag.service import retrieve_context
 
 router = APIRouter()
 
@@ -24,7 +25,12 @@ async def analyze_requirement(requirement_id: str):
     await db.requirements.update_one({"_id": requirement_id}, {"$set": {"status": "ANALYZING"}})
     
     try:
-        analysis_result = analyze_requirement_text(req_data["title"], req_data["description"])
+        context, citations = await retrieve_context(
+            req_data["projectId"], f"{req_data['title']}\n{req_data['description']}"
+        )
+        analysis_result = analyze_requirement_text(
+            req_data["title"], req_data["description"], context, citations
+        )
         # Update requirement with analysis
         await db.requirements.update_one(
             {"_id": requirement_id}, 
@@ -94,8 +100,11 @@ async def generate_code(requirement_id: str):
         )
 
     try:
+        context, citations = await retrieve_context(
+            req_data["projectId"], f"{req_data['title']}\n{req_data['description']}"
+        )
         generated = generate_java_code(
-            req_data["title"], req_data["description"], analysis
+            req_data["title"], req_data["description"], analysis, context, citations
         )
     except ValueError:
         raise HTTPException(
@@ -146,6 +155,7 @@ async def generate_code(requirement_id: str):
                 status="AI_GENERATED",
                 created_at=now,
                 updated_at=now,
+                citations=generated.citations,
             ).model_dump()
         )
 

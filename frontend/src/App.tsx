@@ -19,6 +19,15 @@ interface RequirementAnalysis {
   ambiguities: string[];
   edge_cases: string[];
   acceptance_criteria: string[];
+  citations?: Citation[];
+}
+
+interface Citation {
+  file_path: string;
+  start_line: number | null;
+  end_line: number | null;
+  relevance_score: number;
+  chunk_type: string;
 }
 
 interface Requirement {
@@ -42,6 +51,7 @@ interface CodeArtifact {
   status: 'AI_GENERATED' | 'EDITED';
   created_at: string;
   updated_at: string;
+  citations?: Citation[];
 }
 
 interface CompileResult {
@@ -115,6 +125,8 @@ function App() {
   const [compileResults, setCompileResults] = useState<Record<string, CompileResult>>({});
   const [analyzingArtifactId, setAnalyzingArtifactId] = useState<string | null>(null);
   const [analysisResults, setAnalysisResults] = useState<Record<string, StaticAnalysisResult>>({});
+  const [contextFilePath, setContextFilePath] = useState('');
+  const [contextFileContent, setContextFileContent] = useState('');
 
   // Notifications
   const notifyError = (msg: string) => {
@@ -157,6 +169,26 @@ function App() {
       await fetchProjects();
     } catch (err) {
       notifyError("Failed to create project.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const indexContextFile = async () => {
+    if (!selectedProject || !contextFilePath.trim() || !contextFileContent.trim()) {
+      notifyError("File path and content are required.");
+      return;
+    }
+    setLoading(true);
+    try {
+      const res = await axios.post(`${API_URL}/projects/${selectedProject._id}/files`, {
+        files: [{ file_path: contextFilePath, content: contextFileContent }],
+      });
+      setContextFilePath('');
+      setContextFileContent('');
+      notifySuccess(`Indexed ${res.data.indexed_chunks} context chunk(s).`);
+    } catch (err: any) {
+      notifyError(err.response?.data?.detail || "Failed to index project context.");
     } finally {
       setLoading(false);
     }
@@ -422,6 +454,28 @@ function App() {
                 <p><strong>Description:</strong> {selectedProject.description}</p>
               </div>
 
+              <div className="card mt-4">
+                <h2>Repository Context</h2>
+                <p className="desc">Index a source file or document so future AI analysis and code generation can cite it.</p>
+                <div className="form-group">
+                  <input
+                    value={contextFilePath}
+                    onChange={e => setContextFilePath(e.target.value)}
+                    placeholder="src/main/java/com/example/UserService.java"
+                  />
+                </div>
+                <div className="form-group">
+                  <textarea
+                    value={contextFileContent}
+                    onChange={e => setContextFileContent(e.target.value)}
+                    placeholder="Paste source code or documentation here..."
+                  />
+                </div>
+                <button className="btn-primary" onClick={indexContextFile} disabled={loading}>
+                  Index Context File
+                </button>
+              </div>
+
               <div className="card requirements-section mt-4">
                 <h2>Requirements</h2>
                 
@@ -486,6 +540,16 @@ function App() {
                               <h5>Acceptance Criteria</h5>
                               <ul>{r.analysis.acceptance_criteria.map((i, idx) => <li key={idx}>{i}</li>)}</ul>
                             </div>
+                            {r.analysis.citations && r.analysis.citations.length > 0 && (
+                              <div className="analysis-section">
+                                <h5>Repository Citations</h5>
+                                <ul>{r.analysis.citations.map((citation, idx) => (
+                                  <li key={`${citation.file_path}-${idx}`}>
+                                    {citation.file_path} (lines {citation.start_line ?? '?'}-{citation.end_line ?? '?'}, relevance {Math.round(citation.relevance_score * 100)}%)
+                                  </li>
+                                ))}</ul>
+                              </div>
+                            )}
 
                             {r.status === 'ANALYZED' && (
                               <button className="btn-success mt-3" onClick={async () => {
@@ -557,6 +621,16 @@ function App() {
                                         <strong>{selectedArtifact.file_name}</strong>
                                         <span>Version {selectedArtifact.version} · {selectedArtifact.source}</span>
                                       </div>
+                                      {selectedArtifact.citations && selectedArtifact.citations.length > 0 && (
+                                        <div className="analysis-section">
+                                          <h5>Generation Sources</h5>
+                                          <ul>{selectedArtifact.citations.map((citation: Citation, idx: number) => (
+                                            <li key={`${citation.file_path}-${idx}`}>
+                                              {citation.file_path} ({Math.round(citation.relevance_score * 100)}%)
+                                            </li>
+                                          ))}</ul>
+                                        </div>
+                                      )}
                                       <textarea
                                         value={selectedArtifactId === selectedArtifact.artifact_id ? draftArtifactContent : selectedArtifact.content}
                                         onChange={event => {

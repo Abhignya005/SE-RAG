@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
+from .rag import Citation
 
 
 class GeneratedCodeFile(BaseModel):
@@ -12,6 +13,7 @@ class GeneratedCodeFile(BaseModel):
 
 class GeneratedCodeResponse(BaseModel):
     files: List[GeneratedCodeFile] = Field(min_length=1)
+    citations: List[Citation] = []
 
 
 class CodeArtifact(BaseModel):
@@ -26,6 +28,7 @@ class CodeArtifact(BaseModel):
     status: Literal["AI_GENERATED", "EDITED"]
     created_at: datetime
     updated_at: datetime
+    citations: List[Citation] = []
 
 
 class CodeArtifactEdit(BaseModel):

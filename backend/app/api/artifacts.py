@@ -26,10 +26,43 @@ from app.models.code_artifact import (
 )
 
 router = APIRouter()
-JAVA_FILE_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\.java$")
+JAVA_FILE_NAME_PATTERN = re.compile(
+    r"^(?:[A-Za-z0-9_.-]+/)*[A-Za-z_][A-Za-z0-9_]*\.java$"
+)
 COMPILE_TIMEOUT_SECONDS = 15
 ANALYSIS_TIMEOUT_SECONDS = 30
 APP_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _safe_java_path(file_name: str) -> Path:
+    normalized = file_name.replace("\\", "/")
+    path = Path(normalized)
+    if (
+        path.is_absolute()
+        or ".." in path.parts
+        or not JAVA_FILE_NAME_PATTERN.fullmatch(normalized)
+        or path.name.startswith(".")
+    ):
+        raise HTTPException(status_code=400, detail="Artifact contains an unsafe Java filename")
+    return path
+
+
+def _source_path(temp_dir: str, file_name: str, content: str) -> Path:
+    relative_path = _safe_java_path(file_name)
+    if len(relative_path.parts) > 1:
+        target = Path(temp_dir) / relative_path
+    else:
+        package_match = re.search(
+            r"^\s*package\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*;",
+            content,
+            re.MULTILINE,
+        )
+        target = Path(temp_dir)
+        if package_match:
+            target = target.joinpath(*package_match.group(1).split("."))
+        target = target / relative_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return target
 
 
 @router.put("/{artifact_id}", response_model=CodeArtifact)
@@ -111,16 +144,7 @@ async def compile_artifact(artifact_id: str):
         with tempfile.TemporaryDirectory(prefix="ai-se-compile-") as temp_dir:
             source_paths = []
             for file_name, source_artifact in latest_by_file.items():
-                package_match = re.search(
-                    r"^\s*package\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*;",
-                    source_artifact["content"],
-                    re.MULTILINE,
-                )
-                package_dir = Path(temp_dir)
-                if package_match:
-                    package_dir = package_dir.joinpath(*package_match.group(1).split("."))
-                package_dir.mkdir(parents=True, exist_ok=True)
-                final_path = package_dir / file_name
+                final_path = _source_path(temp_dir, file_name, source_artifact["content"])
                 with final_path.open("w", encoding="utf-8", newline="") as source_file:
                     source_file.write(source_artifact["content"])
                 source_paths.append(str(final_path))
@@ -166,16 +190,7 @@ def _write_sources(temp_dir: str, artifacts: list[dict]) -> list[str]:
     source_paths = []
     for source_artifact in artifacts:
         file_name = source_artifact["file_name"]
-        package_match = re.search(
-            r"^\s*package\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*;",
-            source_artifact["content"],
-            re.MULTILINE,
-        )
-        package_dir = Path(temp_dir)
-        if package_match:
-            package_dir = package_dir.joinpath(*package_match.group(1).split("."))
-        package_dir.mkdir(parents=True, exist_ok=True)
-        final_path = package_dir / file_name
+        final_path = _source_path(temp_dir, file_name, source_artifact["content"])
         final_path.write_text(source_artifact["content"], encoding="utf-8")
         source_paths.append(str(final_path))
     return source_paths
@@ -327,8 +342,8 @@ async def analyze_artifact(artifact_id: str):
         {"project_id": artifact["project_id"], "requirement_id": artifact["requirement_id"], "language": "Java"}
     ).to_list(1000)
     latest = _latest_artifacts(related)
-    if any(not JAVA_FILE_NAME_PATTERN.fullmatch(item["file_name"]) for item in latest):
-        raise HTTPException(status_code=400, detail="Artifact contains an unsafe Java filename")
+    for item in latest:
+        _safe_java_path(item["file_name"])
 
     with tempfile.TemporaryDirectory(prefix="ai-se-analysis-") as temp_dir:
         source_paths = _write_sources(temp_dir, latest)
@@ -362,6 +377,13 @@ async def analyze_artifact(artifact_id: str):
         created_at=datetime.utcnow(),
     )
     await db.static_analysis_results.insert_one(result.model_dump())
+    if result.status == "COMPLETED":
+        requirements = await db.requirements.find(
+            {"projectId": artifact["project_id"]}
+        ).to_list(1000)
+        project = await db.projects.find_one({"_id": artifact["project_id"]})
+        if project and requirements and all(item.get("status") == "CONFIRMED" for item in requirements):
+            await db.projects.update_one({"_id": artifact["project_id"]}, {"$set": {"status": "COMPLETED"}})
     return result
 
 

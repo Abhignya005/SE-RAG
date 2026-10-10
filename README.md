@@ -57,6 +57,32 @@ The generated-code editor provides a `Compile` action for saved Java artifacts. 
 
 The generated-code editor provides `Run Static Analysis`, which calls `POST /artifacts/{artifact_id}/analyze`. Checkstyle analyzes source formatting and coding style, SpotBugs analyzes compiled bytecode when compilation succeeds, and Semgrep runs the configured Java security rules against source files. Findings are parsed from the real tools, displayed separately by category, and persisted in MongoDB. The analysis reports tool-unavailable and not-run states instead of fabricating findings.
 
+### RAG context indexing
+
+Project context can be indexed through `POST /projects/{project_id}/files`:
+
+```json
+{
+  "files": [
+    {
+      "file_path": "src/main/java/com/example/UserService.java",
+      "content": "public class UserService {}"
+    }
+  ]
+}
+```
+
+The backend chunks indexed source and documentation, uses Gemini `text-embedding-004`
+when `AI_API_KEY` is configured, and uses a deterministic local embedding fallback
+for mock/local development. The top five relevant chunks are retrieved for requirement
+analysis and Java generation. Responses include file and line citations. MongoDB stores
+the chunks and embeddings in `project_chunks`; MongoDB Atlas Vector Search can replace
+the Python ranking implementation without changing the API contract.
+
+Generated Java artifacts now accept safe nested relative paths such as
+`src/main/java/com/example/UserService.java`. Paths are reconstructed in isolated
+temporary build and analysis directories.
+
 ### Known Limitations
 - Currently uses Mock MongoDB (`mongomock_motor`) for testing locally without docker, as Docker wasn't available in the test environment. Real MongoDB can be used by setting `USE_MOCK_MONGO=false` and running `docker compose up -d`.
 - Phase 4 compilation requires a JDK with `javac` on `PATH`. Docker sandbox compilation is not configured in this repository.

@@ -8,6 +8,7 @@ from app.api.requirements import router as requirements_router
 from app.api.artifacts import router as artifacts_router
 from app.db.mongodb import connect_to_mongo, close_mongo_connection
 import contextlib
+import os
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -19,7 +20,13 @@ app = FastAPI(title="AI Software Engineering Assistant", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        origin.strip()
+        for origin in os.getenv(
+            "CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"
+        ).split(",")
+        if origin.strip()
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

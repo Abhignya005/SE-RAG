@@ -3,7 +3,9 @@ from typing import List
 from uuid import uuid4
 from ..models.project import Project, ProjectCreate
 from ..models.requirement import Requirement, RequirementCreate
+from ..models.rag import ProjectFileBatch
 from ..db.mongodb import get_db
+from ..services.rag.service import index_project_files
 
 router = APIRouter()
 
@@ -42,6 +44,7 @@ async def add_requirement(project_id: str, req_in: RequirementCreate):
     new_req["projectId"] = project_id
     new_req["status"] = "DRAFT"
     await db.requirements.insert_one(new_req)
+    await db.projects.update_one({"_id": project_id}, {"$set": {"status": "IN_PROGRESS"}})
     return new_req
 
 @router.get("/{project_id}/requirements", response_model=List[Requirement])
@@ -49,3 +52,12 @@ async def get_requirements(project_id: str):
     db = get_db()
     reqs = await db.requirements.find({"projectId": project_id}).to_list(1000)
     return reqs
+
+
+@router.post("/{project_id}/files")
+async def index_files(project_id: str, files_in: ProjectFileBatch):
+    db = get_db()
+    if not await db.projects.find_one({"_id": project_id}):
+        raise HTTPException(status_code=404, detail="Project not found")
+    count = await index_project_files(project_id, files_in.files)
+    return {"project_id": project_id, "indexed_chunks": count}

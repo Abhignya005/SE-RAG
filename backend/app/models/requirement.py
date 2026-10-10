@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+from .rag import Citation
 
 class RequirementAnalysis(BaseModel):
     functional_requirements: List[str] = []
@@ -9,6 +10,7 @@ class RequirementAnalysis(BaseModel):
     ambiguities: List[str] = []
     edge_cases: List[str] = []
     acceptance_criteria: List[str] = []
+    citations: List[Citation] = []
 
 class Requirement(BaseModel):
     id: str = Field(alias="_id", default=None)
